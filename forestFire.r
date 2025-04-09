@@ -4,8 +4,25 @@ library(magick)
 grid_size <- 50
 tree_density <- 0.6
 p_spread_base <- 0.3  # Base probability for fire spread
-wind_direction <- "E"  # "N", "S", "E", "W", or "NONE"
-wind_boost <- 0.3
+wind_direction <- sample(c("N", "S", "E", "W", "NE", "NW", "SE", "SW", "NONE"), 1)  # Random wind direction
+wind_strength <- sample(c("none", "light", "moderate", "strong"), 1, 
+                        prob = c(0.1, 0.3, 0.4, 0.2))  # Random wind strength
+
+# Set wind boost based on strength
+if (wind_strength == "none") {
+  wind_boost <- 0
+  wind_direction <- "NONE"
+} else if (wind_strength == "light") {
+  wind_boost <- 0.15
+} else if (wind_strength == "moderate") {
+  wind_boost <- 0.3
+} else { # strong
+  wind_boost <- 0.5
+}
+
+cat("Wind direction:", wind_direction, "- Wind strength:", wind_strength, 
+    "(boost:", wind_boost, ")\n")
+
 heat_threshold <- 2   # Number of burning neighbors that guarantees ignition
 max_burn_time <- 3    # Maximum steps a tree can burn before being consumed
 persistence_factor <- 0.7  # Chance of a tree continuing to burn based on neighbors
@@ -178,16 +195,35 @@ step_fire <- function(forest, burn_times, p_spread, wind_direction, wind_boost, 
         # Increase probability based on number of burning neighbors
         prob <- prob + (burning_neighbors[ni, nj] * 0.1)
         
-        # Apply wind boost in the wind direction
+        # Apply wind boost for various wind directions
+        # Primary directions
         if (dir == wind_direction) {
           prob <- prob + wind_boost
-        } else if (wind_direction == "N" && (dir == "NE" || dir == "NW")) {
+        }
+        # Handle diagonal wind directions
+        else if (wind_direction == "NE" && (dir == "N" || dir == "E")) {
+          prob <- prob + wind_boost * 0.7
+        }
+        else if (wind_direction == "NW" && (dir == "N" || dir == "W")) {
+          prob <- prob + wind_boost * 0.7
+        }
+        else if (wind_direction == "SE" && (dir == "S" || dir == "E")) {
+          prob <- prob + wind_boost * 0.7
+        }
+        else if (wind_direction == "SW" && (dir == "S" || dir == "W")) {
+          prob <- prob + wind_boost * 0.7
+        }
+        # Adjacent to wind direction (primary directions)
+        else if (wind_direction == "N" && (dir == "NE" || dir == "NW")) {
           prob <- prob + wind_boost * 0.5
-        } else if (wind_direction == "S" && (dir == "SE" || dir == "SW")) {
+        }
+        else if (wind_direction == "S" && (dir == "SE" || dir == "SW")) {
           prob <- prob + wind_boost * 0.5
-        } else if (wind_direction == "E" && (dir == "NE" || dir == "SE")) {
+        }
+        else if (wind_direction == "E" && (dir == "NE" || dir == "SE")) {
           prob <- prob + wind_boost * 0.5
-        } else if (wind_direction == "W" && (dir == "NW" || dir == "SW")) {
+        }
+        else if (wind_direction == "W" && (dir == "NW" || dir == "SW")) {
           prob <- prob + wind_boost * 0.5
         }
         
