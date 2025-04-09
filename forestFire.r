@@ -3,10 +3,12 @@ library(magick)
 # PARAMETERS
 grid_size <- 50
 tree_density <- 0.6
-p_spread_base <- 0.3  # Increased for better spread
+p_spread_base <- 0.3  # Base probability for fire spread
 wind_direction <- "E"  # "N", "S", "E", "W", or "NONE"
 wind_boost <- 0.3
 heat_threshold <- 2   # Number of burning neighbors that guarantees ignition
+max_burn_time <- 3    # Maximum steps a tree can burn before being consumed
+persistence_factor <- 0.7  # Chance of a tree continuing to burn based on neighbors
 n_steps <- 200
 frame_dir <- "frames"
 gif_path <- "forest_fire.gif"
@@ -15,9 +17,10 @@ png_dir <- "png_frames"  # Directory to save individual PNG frames
 # STATE CODES
 EMPTY <- 0
 TREE <- 1
-BURNING <- 2
-BURNED <- 3  # New state to track burned cells separately from initially empty cells
+BURNING <- 2  # Now will have associated burn_time value
+BURNED <- 3  # Fully consumed by fire
 
+# Create directories
 dir.create(frame_dir, showWarnings = FALSE)
 dir.create(png_dir, showWarnings = FALSE)
 
@@ -28,9 +31,15 @@ initialize_forest <- function(size, density) {
   return(forest)
 }
 
-ignite_random_tree <- function(forest) {
+# Function to initialize burn time tracking matrix
+initialize_burn_times <- function(size) {
+  burn_times <- matrix(0, nrow = size, ncol = size)
+  return(burn_times)
+}
+
+ignite_random_tree <- function(forest, burn_times) {
   tree_positions <- which(forest == TREE, arr.ind = TRUE)
-  if (nrow(tree_positions) == 0) return(forest)
+  if (nrow(tree_positions) == 0) return(list(forest = forest, burn_times = burn_times))
   
   # Select a random tree from the center 50% of the grid for better spread
   size <- nrow(forest)
@@ -50,7 +59,9 @@ ignite_random_tree <- function(forest) {
   }
   
   forest[chosen[1], chosen[2]] <- BURNING
-  return(forest)
+  burn_times[chosen[1], chosen[2]] <- 1  # Start burn timer at 1
+  
+  return(list(forest = forest, burn_times = burn_times))
 }
 
 # Define direction mappings
@@ -98,14 +109,30 @@ get_neighbors <- function(i, j, size) {
   return(neighbors)
 }
 
-# STEP FIRE function with enhanced neighborhood effects
-step_fire <- function(forest, p_spread, wind_direction, wind_boost, heat_threshold) {
+# Enhanced STEP FIRE function with burn time and persistence
+step_fire <- function(forest, burn_times, p_spread, wind_direction, wind_boost, heat_threshold, 
+                      max_burn_time, persistence_factor) {
   size <- nrow(forest)
   new_forest <- forest
+  new_burn_times <- burn_times
+  
   fire_spread_cells <- which(forest == BURNING, arr.ind = TRUE)
+  
+  # If no burning cells, just return the current state
+  if (nrow(fire_spread_cells) == 0) {
+    return(list(forest = new_forest, burn_times = new_burn_times))
+  }
   
   # Track the number of burning neighbors for each tree
   burning_neighbors <- matrix(0, nrow = size, ncol = size)
+  
+  # Calculate burning intensity for each burning tree (1 to max_burn_time)
+  burning_intensity <- matrix(0, nrow = size, ncol = size)
+  for (i in 1:nrow(fire_spread_cells)) {
+    x <- fire_spread_cells[i, 1]
+    y <- fire_spread_cells[i, 2]
+    burning_intensity[x, y] <- burn_times[x, y] / max_burn_time
+  }
   
   # Count burning neighbors for all cells
   for (i in 1:nrow(fire_spread_cells)) {
@@ -119,7 +146,9 @@ step_fire <- function(forest, p_spread, wind_direction, wind_boost, heat_thresho
       
       # Increment the burning neighbor count for this cell
       if (forest[ni, nj] == TREE) {
-        burning_neighbors[ni, nj] <- burning_neighbors[ni, nj] + 1
+        # Weight burning neighbors by their intensity
+        intensity_factor <- burn_times[x, y] / max_burn_time
+        burning_neighbors[ni, nj] <- burning_neighbors[ni, nj] + intensity_factor
       }
     }
   }
@@ -139,6 +168,7 @@ step_fire <- function(forest, p_spread, wind_direction, wind_boost, heat_thresho
         # If tree has enough burning neighbors, it will definitely catch fire
         if (burning_neighbors[ni, nj] >= heat_threshold) {
           new_forest[ni, nj] <- BURNING
+          new_burn_times[ni, nj] <- 1  # Start burn timer
           next
         }
         
@@ -167,58 +197,134 @@ step_fire <- function(forest, p_spread, wind_direction, wind_boost, heat_thresho
         # If the random chance is below the probability, ignite the tree
         if (runif(1) < prob) {
           new_forest[ni, nj] <- BURNING
+          new_burn_times[ni, nj] <- 1  # Start burn timer
         }
       }
     }
   }
   
-  # Keep some trees burning for another step (30% chance)
-  # Reduced from previous 50% for faster transition through burning phase
+  # Process burning trees for persistence or burnout
   for (i in 1:nrow(fire_spread_cells)) {
     x <- fire_spread_cells[i, 1]
     y <- fire_spread_cells[i, 2]
     
-    # 70% chance to burn out, 30% chance to keep burning
-    if (runif(1) > 0.3) {
-      new_forest[x, y] <- BURNED
+    # Calculate persistence chance based on neighboring burning trees
+    neighbors <- get_neighbors(x, y, size)
+    burning_neighbor_count <- 0
+    for (n in neighbors) {
+      ni <- n$coords[1]
+      nj <- n$coords[2]
+      if (forest[ni, nj] == BURNING) {
+        burning_neighbor_count <- burning_neighbor_count + 1
+      }
     }
-    # else: keep it as BURNING
+    
+    # Persistence chance increases with more burning neighbors
+    # Base: persistence_factor, +5% for each burning neighbor
+    persistence_chance <- persistence_factor + (0.05 * burning_neighbor_count)
+    persistence_chance <- min(persistence_chance, 0.9)  # Cap at 90%
+    
+    # Increment burn time for this cell
+    current_burn_time <- burn_times[x, y] + 1
+    
+    # If burn time exceeds max or fails persistence check, mark as BURNED
+    if (current_burn_time > max_burn_time || runif(1) > persistence_chance) {
+      new_forest[x, y] <- BURNED
+      new_burn_times[x, y] <- 0
+    } else {
+      # Continue burning with incremented burn time
+      new_burn_times[x, y] <- current_burn_time
+    }
   }
   
-  return(new_forest)
+  return(list(forest = new_forest, burn_times = new_burn_times))
 }
 
-# PLOT AND SAVE FRAME
-plot_and_save_forest <- function(forest, step, burned_percent) {
+# Enhanced PLOT AND SAVE function with burn intensity visualization
+plot_and_save_forest <- function(forest, burn_times, step, burned_percent, max_burn_time) {
+  # Create visualization matrix (for coloring)
+  viz_matrix <- matrix(0, nrow = nrow(forest), ncol = ncol(forest))
+  
+  # Map states to visualization indices
+  # 1 = Empty (gray)
+  # 2 = Tree (green)
+  # 3 = Burned (dark gray)
+  # 4+ = Burning with different intensities (orange to dark red)
+  
+  # First set base states
+  viz_matrix[forest == EMPTY] <- 1  # Empty
+  viz_matrix[forest == TREE] <- 2   # Tree
+  viz_matrix[forest == BURNED] <- 3 # Burned
+  
+  # Then set burning cells with their intensity levels
+  burning_cells <- which(forest == BURNING, arr.ind = TRUE)
+  if (nrow(burning_cells) > 0) {
+    for (i in 1:nrow(burning_cells)) {
+      x <- burning_cells[i, 1]
+      y <- burning_cells[i, 2]
+      burn_intensity <- burn_times[x, y]
+      # Map intensity to color index (add offset to avoid conflict with other states)
+      viz_matrix[x, y] <- 3 + burn_intensity
+    }
+  }
+  
+  # Create custom color palette for different burning intensities
+  burning_colors <- colorRampPalette(c("orange", "red", "darkred"))(max_burn_time)
+  
+  # Create complete color palette
+  col_palette <- c("gray", "forestgreen", "darkgray")
+  col_palette <- c(col_palette, burning_colors)
+  
   # Save each frame as a PNG file
   png_filename <- sprintf("%s/frame_%03d.png", png_dir, step)
   png(png_filename, width = 500, height = 500)
-  # Use a 4-color palette: gray for empty, green for trees, red for burning, dark gray for burned
-  image(t(apply(forest, 2, rev)),
-        col = c("gray", "forestgreen", "red", "darkgray"),
+  
+  image(t(apply(viz_matrix, 2, rev)),
+        col = col_palette,
         axes = FALSE,
         main = paste("Step", step, "- Burned:", round(burned_percent, 1), "%"))
+  
+  # Add legend for burn intensity
+  legend("topright", 
+         legend = c("Empty", "Tree", "Burned", paste("Burning", 1:max_burn_time)), 
+         fill = c("gray", "forestgreen", "darkgray", burning_colors),
+         cex = 0.7, bg = "white")
+  
   dev.off()
   
   # Optionally, save the same frame to the frame directory (for GIF)
   frame_filename <- sprintf("%s/frame_%03d.png", frame_dir, step)
   png(frame_filename, width = 500, height = 500)
-  image(t(apply(forest, 2, rev)),
-        col = c("gray", "forestgreen", "red", "darkgray"),
+  
+  image(t(apply(viz_matrix, 2, rev)),
+        col = col_palette,
         axes = FALSE,
         main = paste("Step", step, "- Burned:", round(burned_percent, 1), "%"))
+  
+  # Add legend for burn intensity
+  legend("topright", 
+         legend = c("Empty", "Tree", "Burned", paste("Burning", 1:max_burn_time)), 
+         fill = c("gray", "forestgreen", "darkgray", burning_colors),
+         cex = 0.7, bg = "white")
+  
   dev.off()
 }
 
 # RUN SIMULATION
 forest <- initialize_forest(grid_size, tree_density)
+burn_times <- initialize_burn_times(grid_size)
 initial_empty_count <- sum(forest == EMPTY)
 
-# Ignite multiple trees for a more robust start
-forest <- ignite_random_tree(forest)
-# Ignite a few more trees (optional - more aggressive start)
+# Ignite initial trees
+result <- ignite_random_tree(forest, burn_times)
+forest <- result$forest
+burn_times <- result$burn_times
+
+# Ignite a few more trees
 for (i in 1:3) {
-  forest <- ignite_random_tree(forest)
+  result <- ignite_random_tree(forest, burn_times)
+  forest <- result$forest
+  burn_times <- result$burn_times
 }
 
 initial_tree_count <- sum(forest == TREE) + sum(forest == BURNING)
@@ -232,13 +338,16 @@ for (step in 1:n_steps) {
   burning_count <- sum(forest == BURNING)
   burned_percent <- 100 * (burned_count + burning_count) / initial_tree_count
   
-  plot_and_save_forest(forest, step, burned_percent)
+  plot_and_save_forest(forest, burn_times, step, burned_percent, max_burn_time)
   
   # Enhanced termination condition: either no burning trees or reached high burn percentage
   if (!any(forest == BURNING) || burned_percent > 99) break
   
-  # Pass the heat_threshold parameter to the step_fire function
-  forest <- step_fire(forest, p_spread_base, wind_direction, wind_boost, heat_threshold)
+  # Step the simulation
+  result <- step_fire(forest, burn_times, p_spread_base, wind_direction, wind_boost, 
+                      heat_threshold, max_burn_time, persistence_factor)
+  forest <- result$forest
+  burn_times <- result$burn_times
 }
 
 # CREATE GIF
